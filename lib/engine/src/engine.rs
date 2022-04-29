@@ -10,7 +10,7 @@ mod private {
     pub struct Internal(pub(super) ());
 }
 
-/// A unimplemented Wasmer `Engine`.
+/// A Wasmer `Engine`.
 ///
 /// This trait is used by implementors to implement custom engines
 /// such as: Universal or Native.
@@ -38,10 +38,6 @@ pub trait Engine {
         binary: &[u8],
         tunables: &dyn Tunables,
     ) -> Result<Box<dyn crate::Executable>, CompileError>;
-
-    /// Load a compiled executable with this engine.
-    fn load(&self, executable: &(dyn crate::Executable))
-        -> Result<Arc<dyn Artifact>, CompileError>;
 
     /// A unique identifier for this object.
     ///
@@ -95,6 +91,17 @@ impl Default for EngineId {
 impl dyn Engine {
     /// Downcast a dynamic Executable object to a concrete implementation of the trait.
     pub fn downcast_ref<T: Engine + 'static>(&self) -> Option<&T> {
+        if std::any::TypeId::of::<T>() == self.type_id(private::Internal(())) {
+            unsafe { Some(&*(self as *const dyn Engine as *const T)) }
+        } else {
+            None
+        }
+    }
+}
+
+impl dyn Engine + Send + Sync {
+    /// Downcast a dynamic Executable object to a concrete implementation of the trait.
+    pub fn downcast_ref<T: Engine + Send + Sync + 'static>(&self) -> Option<&T> {
         if std::any::TypeId::of::<T>() == self.type_id(private::Internal(())) {
             unsafe { Some(&*(self as *const dyn Engine as *const T)) }
         } else {

@@ -2,6 +2,7 @@
 mod sys {
     use anyhow::Result;
     use wasmer::*;
+    use wasmer_engine_universal::CodeMemory;
 
     #[test]
     fn global_new() -> Result<()> {
@@ -394,8 +395,9 @@ mod sys {
   (export "sum" (func $sum_f)))
 "#;
 
+        let mut code_memory = CodeMemory::new();
         let f = {
-            let module = Module::new(&store, wat)?;
+            let module = Module::new(&store, wat, &mut code_memory)?;
             let instance = Instance::new(&module, &imports! {})?;
             let f: NativeFunc<(i32, i32), i32> = instance.get_native_function("sum").unwrap();
 
@@ -422,7 +424,8 @@ mod sys {
 "#;
 
         let f = {
-            let module = Module::new(&store, wat)?;
+            let mut code_memory = CodeMemory::new();
+            let module = Module::new(&store, wat, &mut code_memory)?;
             let instance = Instance::new(&module, &imports! {})?;
             let f: NativeFunc<(i32, i32), i32> = instance.get_native_function("sum").unwrap();
             assert_eq!(f.call(4, 5)?, 9);

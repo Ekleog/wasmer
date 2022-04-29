@@ -10,11 +10,6 @@ use std::io;
 use std::ptr;
 use std::slice;
 
-/// Round `size` up to the nearest multiple of `page_size`.
-fn round_up_to_page_size(size: usize, page_size: usize) -> usize {
-    (size + (page_size - 1)) & !(page_size - 1)
-}
-
 /// A simple struct consisting of a page-aligned pointer to page-aligned
 /// and initially-zeroed memory and a length.
 #[derive(Debug)]
@@ -40,10 +35,16 @@ impl Mmap {
         }
     }
 
+    /// Round `size` up to the nearest multiple of `page_size`.
+    pub fn round_up_to_page_size(size: usize) -> usize {
+        // let page_size = region::page::size();
+        let page_size = 2 * 1024 * 1024;
+        (size + (page_size - 1)) & !(page_size - 1)
+    }
+
     /// Create a new `Mmap` pointing to at least `size` bytes of page-aligned accessible memory.
-    pub fn with_at_least(size: usize) -> Result<Self, String> {
-        let page_size = region::page::size();
-        let rounded_size = round_up_to_page_size(size, page_size);
+    pub fn with_at_least(size: usize) -> Result<Self, io::Error> {
+        let rounded_size = Self::round_up_to_page_size(size);
         Self::accessible_reserved(rounded_size, rounded_size)
     }
 
@@ -54,7 +55,7 @@ impl Mmap {
     pub fn accessible_reserved(
         accessible_size: usize,
         mapping_size: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, io::Error> {
         let page_size = region::page::size();
         assert_le!(accessible_size, mapping_size);
         assert_eq!(mapping_size & (page_size - 1), 0);
@@ -71,15 +72,15 @@ impl Mmap {
             let ptr = unsafe {
                 libc::mmap(
                     ptr::null_mut(),
-                    mapping_size,
+                    dbg!(mapping_size),
                     libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_LOCKED | libc::MAP_POPULATE | libc::MAP_HUGE_2MB | libc::MAP_HUGETLB,
                     -1,
                     0,
                 )
             };
             if ptr as isize == -1_isize {
-                return Err(io::Error::last_os_error().to_string());
+                return Err(io::Error::last_os_error());
             }
 
             Self {
@@ -91,15 +92,15 @@ impl Mmap {
             let ptr = unsafe {
                 libc::mmap(
                     ptr::null_mut(),
-                    mapping_size,
+                    dbg!(mapping_size),
                     libc::PROT_NONE,
-                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_LOCKED | libc::MAP_HUGE_2MB | libc::MAP_HUGETLB,
                     -1,
                     0,
                 )
             };
             if ptr as isize == -1_isize {
-                return Err(io::Error::last_os_error().to_string());
+                return Err(io::Error::last_os_error());
             }
 
             let mut result = Self {
@@ -123,7 +124,7 @@ impl Mmap {
     pub fn accessible_reserved(
         accessible_size: usize,
         mapping_size: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, io::Error> {
         use winapi::um::memoryapi::VirtualAlloc;
         use winapi::um::winnt::{MEM_COMMIT, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE};
 
@@ -149,7 +150,7 @@ impl Mmap {
                 )
             };
             if ptr.is_null() {
-                return Err(io::Error::last_os_error().to_string());
+                return Err(io::Error::last_os_error());
             }
 
             Self {
@@ -161,7 +162,7 @@ impl Mmap {
             let ptr =
                 unsafe { VirtualAlloc(ptr::null_mut(), mapping_size, MEM_RESERVE, PAGE_NOACCESS) };
             if ptr.is_null() {
-                return Err(io::Error::last_os_error().to_string());
+                return Err(io::Error::last_os_error());
             }
 
             let mut result = Self {
@@ -182,7 +183,7 @@ impl Mmap {
     /// `start` and `len` must be native page-size multiples and describe a range within
     /// `self`'s reserved memory.
     #[cfg(not(target_os = "windows"))]
-    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<(), String> {
+    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<(), io::Error> {
         let page_size = region::page::size();
         assert_eq!(start & (page_size - 1), 0);
         assert_eq!(len & (page_size - 1), 0);
@@ -191,15 +192,17 @@ impl Mmap {
 
         // Commit the accessible size.
         let ptr = self.ptr as *const u8;
-        unsafe { region::protect(ptr.add(start), len, region::Protection::READ_WRITE) }
-            .map_err(|e| e.to_string())
+        unsafe {
+            region::protect(ptr.add(start), len, region::Protection::READ_WRITE)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        }
     }
 
     /// Make the memory starting at `start` and extending for `len` bytes accessible.
     /// `start` and `len` must be native page-size multiples and describe a range within
     /// `self`'s reserved memory.
     #[cfg(target_os = "windows")]
-    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<(), String> {
+    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<(), io::Error> {
         use winapi::ctypes::c_void;
         use winapi::um::memoryapi::VirtualAlloc;
         use winapi::um::winnt::{MEM_COMMIT, PAGE_READWRITE};
@@ -221,7 +224,7 @@ impl Mmap {
         }
         .is_null()
         {
-            return Err(io::Error::last_os_error().to_string());
+            return Err(io::Error::last_os_error());
         }
 
         Ok(())
@@ -290,9 +293,9 @@ mod tests {
 
     #[test]
     fn test_round_up_to_page_size() {
-        assert_eq!(round_up_to_page_size(0, 4096), 0);
-        assert_eq!(round_up_to_page_size(1, 4096), 4096);
-        assert_eq!(round_up_to_page_size(4096, 4096), 4096);
-        assert_eq!(round_up_to_page_size(4097, 4096), 8192);
+        assert_eq!(Mmap::round_up_to_page_size(0), 0);
+        assert_eq!(Mmap::round_up_to_page_size(1), 4096);
+        assert_eq!(Mmap::round_up_to_page_size(4096), 4096);
+        assert_eq!(Mmap::round_up_to_page_size(4097), 8192);
     }
 }

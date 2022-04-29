@@ -111,6 +111,8 @@ pub use wasmer_compiler_llvm::{LLVMOptLevel, LLVM};
 
 #[cfg(feature = "universal")]
 pub use wasmer_engine_universal::{Universal, UniversalArtifact, UniversalEngine};
+#[cfg(feature = "universal")]
+pub use wasmer_engine_universal::CodeMemory;
 
 #[cfg(feature = "dylib")]
 pub use wasmer_engine_dylib::{Dylib, DylibArtifact, DylibEngine};

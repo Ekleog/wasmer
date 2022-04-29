@@ -2,6 +2,7 @@
 mod sys {
     use anyhow::Result;
     use wasmer::*;
+    use wasmer_engine_universal::CodeMemory;
     use wasmer_vm::{VMGlobal, VMMemory, VMTable, WeakOrStrongInstanceRef};
 
     const MEM_WAT: &str = "
@@ -120,9 +121,10 @@ mod sys {
             );
         };
 
+        let mut code_memory = CodeMemory::new();
         let f: NativeFunc<(), ()> = {
             let store = Store::default();
-            let module = Module::new(&store, MEM_WAT)?;
+            let module = Module::new(&store, MEM_WAT, &mut code_memory)?;
             let env = MemEnv::default();
 
             let instance = Instance::new(
@@ -176,9 +178,10 @@ mod sys {
             );
         };
 
+        let mut code_memory = CodeMemory::new();
         let f: NativeFunc<(), ()> = {
             let store = Store::default();
-            let module = Module::new(&store, GLOBAL_WAT)?;
+            let module = Module::new(&store, GLOBAL_WAT, &mut code_memory)?;
             let env = GlobalEnv::default();
 
             let instance = Instance::new(
@@ -232,9 +235,10 @@ mod sys {
             );
         };
 
+        let mut code_memory = CodeMemory::new();
         let f: NativeFunc<(), ()> = {
             let store = Store::default();
-            let module = Module::new(&store, TABLE_WAT)?;
+            let module = Module::new(&store, TABLE_WAT, &mut code_memory)?;
             let env = TableEnv::default();
 
             let instance = Instance::new(
@@ -279,9 +283,10 @@ mod sys {
             assert_eq!(is_function_instance_ref_strong(&function), Some(false));
         };
 
+        let mut code_memory = CodeMemory::new();
         let f: NativeFunc<(), ()> = {
             let store = Store::default();
-            let module = Module::new(&store, FUNCTION_WAT)?;
+            let module = Module::new(&store, FUNCTION_WAT, &mut code_memory)?;
             let env = FunctionEnv::default();
 
             let instance = Instance::new(
@@ -332,9 +337,10 @@ mod sys {
             );
         };
 
+        let mut code_memory = CodeMemory::new();
         let f: NativeFunc<(), ()> = {
             let store = Store::default();
-            let module = Module::new(&store, FUNCTION_WAT)?;
+            let module = Module::new(&store, FUNCTION_WAT, &mut code_memory)?;
             let env = FunctionEnv::default();
 
             let instance = Instance::new(

@@ -28,7 +28,7 @@ mod trap;
 
 pub use crate::engine::{Engine, EngineId};
 pub use crate::error::{DeserializeError, ImportError, InstantiationError, LinkError};
-pub use crate::executable::Executable;
+pub use crate::executable::{Executable, Loadable};
 pub use crate::resolver::resolve_imports;
 pub use crate::trap::*;
 

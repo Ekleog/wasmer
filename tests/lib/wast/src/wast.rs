@@ -33,6 +33,7 @@ pub struct Wast {
     /// A flag indicating that assert_trap and assert_exhaustion should be skipped.
     /// See https://github.com/wasmerio/wasmer/issues/1550 for more info
     disable_assert_trap_exhaustion: bool,
+    code_memory: std::sync::Mutex<CodeMemory>,
 }
 
 impl Wast {
@@ -49,6 +50,7 @@ impl Wast {
             extern_refs: BTreeMap::new(),
             fail_fast: true,
             disable_assert_trap_exhaustion: false,
+            code_memory: std::sync::Mutex::new(CodeMemory::new()),
         }
     }
 
@@ -379,7 +381,8 @@ impl Wast {
     }
 
     fn instantiate(&self, module: &[u8]) -> Result<Instance> {
-        let module = Module::new(&self.store, module)?;
+        let mut code_memory = self.code_memory.lock().unwrap();
+        let module = Module::new(&self.store, module, &mut *code_memory)?;
         let instance = Instance::new(&module, &self)?;
         Ok(instance)
     }

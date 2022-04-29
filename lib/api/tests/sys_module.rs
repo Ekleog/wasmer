@@ -33,7 +33,8 @@ mod sys {
     (func (export "call_host_func8")
           (call 7 (i32.const -1)))
 )"#;
-        let module = Module::new(&store, wat)?;
+        let mut code_memory = CodeMemory::new();
+        let module = Module::new(&store, wat, &mut code_memory)?;
         let imports = imports! {
             "host" => {
                 "host_func1" => Function::new_native(&store, |p: u64| {

@@ -9,7 +9,9 @@ use wasmer_compiler::CompileError;
 #[cfg(feature = "wat")]
 use wasmer_compiler::WasmError;
 use wasmer_engine::RuntimeError;
+use wasmer_engine_universal::CodeMemory;
 use wasmer_engine_universal::UniversalArtifact;
+use wasmer_engine_universal::UniversalEngine;
 use wasmer_types::InstanceConfig;
 use wasmer_vm::{InstanceHandle, Instantiatable, Resolver};
 
@@ -98,7 +100,11 @@ impl Module {
     /// # }
     /// ```
     #[allow(unreachable_code)]
-    pub fn new(store: &Store, bytes: impl AsRef<[u8]>) -> Result<Self, CompileError> {
+    pub fn new(
+        store: &Store,
+        bytes: impl AsRef<[u8]>,
+        code_memory: &mut CodeMemory,
+    ) -> Result<Self, CompileError> {
         #[cfg(feature = "wat")]
         let bytes = wat::parse_bytes(bytes.as_ref()).map_err(|e| {
             CompileError::Wasm(WasmError::Generic(format!(
@@ -107,14 +113,18 @@ impl Module {
             )))
         })?;
 
-        Self::from_binary(store, bytes.as_ref())
+        Self::from_binary(store, bytes.as_ref(), code_memory)
     }
 
     /// Creates a new WebAssembly module from a file path.
-    pub fn from_file(store: &Store, file: impl AsRef<Path>) -> Result<Self, IoCompileError> {
+    pub fn from_file(
+        store: &Store,
+        file: impl AsRef<Path>,
+        code_memory: &mut CodeMemory,
+    ) -> Result<Self, IoCompileError> {
         let file_ref = file.as_ref();
         let wasm_bytes = std::fs::read(file_ref)?;
-        let module = Self::new(store, &wasm_bytes)?;
+        let module = Self::new(store, &wasm_bytes, code_memory)?;
         // Set the module name to the absolute path of the filename.
         // This is useful for debugging the stack traces.
         Ok(module)
@@ -125,9 +135,13 @@ impl Module {
     /// Opposed to [`Module::new`], this function is not compatible with
     /// the WebAssembly text format (if the "wat" feature is enabled for
     /// this crate).
-    pub fn from_binary(store: &Store, binary: &[u8]) -> Result<Self, CompileError> {
+    pub fn from_binary(
+        store: &Store,
+        binary: &[u8],
+        code_memory: &mut CodeMemory,
+    ) -> Result<Self, CompileError> {
         Self::validate(store, binary)?;
-        unsafe { Self::from_binary_unchecked(store, binary) }
+        unsafe { Self::from_binary_unchecked(store, binary, code_memory) }
     }
 
     /// Creates a new WebAssembly module skipping any kind of validation.
@@ -140,8 +154,9 @@ impl Module {
     pub unsafe fn from_binary_unchecked(
         store: &Store,
         binary: &[u8],
+        code_memory: &mut CodeMemory,
     ) -> Result<Self, CompileError> {
-        let module = Self::compile(store, binary)?;
+        let module = Self::compile(store, binary, code_memory)?;
         Ok(module)
     }
 
@@ -155,15 +170,19 @@ impl Module {
         store.engine().validate(binary)
     }
 
-    fn compile(store: &Store, binary: &[u8]) -> Result<Self, CompileError> {
-        let executable = store.engine().compile(binary, store.tunables())?;
-        let artifact = store.engine().load(&*executable)?;
-        match artifact.downcast_arc::<UniversalArtifact>() {
-            Ok(universal) => Ok(Self::from_universal_artifact(store, universal)),
-            // We're are probably given an externally defined artifact type
-            // which I imagine we don't care about for now since this entire crate
-            // is only used for tests and this crate only defines universal engine.
-            Err(_) => panic!("unhandled artifact type"),
+    fn compile(
+        store: &Store,
+        binary: &[u8],
+        code_memory: &mut CodeMemory,
+    ) -> Result<Self, CompileError> {
+        match store.engine().downcast_ref::<UniversalEngine>() {
+            Some(universal_engine) => {
+                let executable = universal_engine.compile_universal(binary, store.tunables())?;
+                let artifact =
+                    Arc::new(universal_engine.load_universal_executable(code_memory, &executable)?);
+                Ok(Self::from_universal_artifact(store, artifact))
+            }
+            None => panic!("unknown engine type"),
         }
     }
 

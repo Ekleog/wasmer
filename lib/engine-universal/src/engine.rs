@@ -3,6 +3,7 @@
 use crate::executable::{unrkyv, UniversalExecutableRef};
 use crate::{CodeMemory, UniversalArtifact, UniversalExecutable};
 use rkyv::de::deserializers::SharedDeserializeMap;
+use wasmer_compiler::wasmparser::CodeSectionReader;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
@@ -41,7 +42,6 @@ impl UniversalEngine {
         Self {
             inner: Arc::new(Mutex::new(UniversalEngineInner {
                 compiler: Some(compiler),
-                code_memory: vec![],
                 signatures: SignatureRegistry::new(),
                 func_data: Arc::new(FuncDataRegistry::new()),
                 features,
@@ -69,7 +69,6 @@ impl UniversalEngine {
             inner: Arc::new(Mutex::new(UniversalEngineInner {
                 #[cfg(feature = "compiler")]
                 compiler: None,
-                code_memory: vec![],
                 signatures: SignatureRegistry::new(),
                 func_data: Arc::new(FuncDataRegistry::new()),
                 features: Features::default(),
@@ -161,6 +160,7 @@ impl UniversalEngine {
     /// Load a [`UniversalExecutable`](crate::UniversalExecutable) with this engine.
     pub fn load_universal_executable(
         &self,
+        code_memory: &mut CodeMemory,
         executable: &UniversalExecutable,
     ) -> Result<UniversalArtifact, CompileError> {
         let info = &executable.compile_info;
@@ -199,6 +199,7 @@ impl UniversalEngine {
             .collect::<PrimaryMap<SignatureIndex, _>>()
             .into_boxed_slice();
         let (functions, _, dynamic_trampolines, custom_sections) = inner_engine.allocate(
+            code_memory,
             local_functions,
             function_call_trampolines.iter().map(|(_, b)| b.into()),
             dynamic_function_trampolines.iter().map(|(_, b)| b.into()),
@@ -243,14 +244,18 @@ impl UniversalEngine {
         );
 
         // Make all code loaded executable.
-        inner_engine.publish_compiled_code();
+        code_memory.publish();
         if let Some(ref d) = executable.debug {
             unsafe {
                 // TODO: safety comment
-                inner_engine.publish_eh_frame(std::slice::from_raw_parts(
+                let eh_frame = std::slice::from_raw_parts(
                     *custom_sections[d.eh_frame],
                     executable.custom_sections[d.eh_frame].bytes.len(),
-                ))?;
+                );
+                let registry = code_memory.unwind_registry_mut();
+                registry.publish(eh_frame).map_err(|e| {
+                    CompileError::Resource(format!("Error while publishing the unwind code: {}", e))
+                })?;
             }
         }
         let exports = module
@@ -282,6 +287,7 @@ impl UniversalEngine {
     /// Load a [`UniversalExecutableRef`](crate::UniversalExecutableRef) with this engine.
     pub fn load_universal_executable_ref(
         &self,
+        code_memory: &mut CodeMemory,
         executable: &UniversalExecutableRef,
     ) -> Result<UniversalArtifact, CompileError> {
         let info = &executable.compile_info;
@@ -336,6 +342,7 @@ impl UniversalEngine {
             .collect::<PrimaryMap<SignatureIndex, _>>()
             .into_boxed_slice();
         let (functions, _, dynamic_trampolines, custom_sections) = inner_engine.allocate(
+            code_memory,
             local_functions,
             call_trampolines.map(|(_, b)| b.into()),
             dynamic_trampolines.map(|(_, b)| b.into()),
@@ -386,15 +393,19 @@ impl UniversalEngine {
         );
 
         // Make all code compiled thus far executable.
-        inner_engine.publish_compiled_code();
+        code_memory.publish();
         if let rkyv::option::ArchivedOption::Some(ref d) = executable.debug {
             unsafe {
                 // TODO: safety comment
                 let s = CustomSectionRef::from(&executable.custom_sections[&d.eh_frame]);
-                inner_engine.publish_eh_frame(std::slice::from_raw_parts(
+                let eh_frame = std::slice::from_raw_parts(
                     *custom_sections[unrkyv(&d.eh_frame)],
                     s.bytes.len(),
-                ))?;
+                );
+                let registry = code_memory.unwind_registry_mut();
+                registry.publish(eh_frame).map_err(|e| {
+                    CompileError::Resource(format!("Error while publishing the unwind code: {}", e))
+                })?;
             }
         }
         let exports = module
@@ -420,6 +431,17 @@ impl UniversalEngine {
             passive_elements,
             local_globals,
         })
+    }
+
+    /// Load an executable with this engine.
+    ///
+    /// Must be an universal executable.
+    pub fn load(
+        &self,
+        code_memory: &mut CodeMemory,
+        executable: &(dyn wasmer_engine::Loadable<CodeStore = CodeMemory>),
+    ) -> Result<Arc<dyn wasmer_vm::Artifact>, CompileError> {
+        executable.load(code_memory, self)
     }
 }
 
@@ -471,13 +493,6 @@ impl Engine for UniversalEngine {
             .map(|ex| Box::new(ex) as _)
     }
 
-    fn load(
-        &self,
-        executable: &(dyn wasmer_engine::Executable),
-    ) -> Result<Arc<dyn wasmer_vm::Artifact>, CompileError> {
-        executable.load(self)
-    }
-
     fn id(&self) -> &EngineId {
         &self.engine_id
     }
@@ -494,9 +509,6 @@ pub struct UniversalEngineInner {
     compiler: Option<Box<dyn Compiler>>,
     /// The features to compile the Wasm module with
     features: Features,
-    /// The code memory is responsible of publishing the compiled
-    /// functions to memory.
-    code_memory: Vec<CodeMemory>,
     /// The signature registry is used mainly to operate with trampolines
     /// performantly.
     pub(crate) signatures: SignatureRegistry,
@@ -540,6 +552,7 @@ impl UniversalEngineInner {
     #[allow(clippy::type_complexity)]
     pub(crate) fn allocate<'a>(
         &mut self,
+        code_memory: &mut CodeMemory,
         local_functions: impl ExactSizeIterator<Item = FunctionBodyRef<'a>>,
         call_trampolines: impl ExactSizeIterator<Item = FunctionBodyRef<'a>>,
         dynamic_trampolines: impl ExactSizeIterator<Item = FunctionBodyRef<'a>>,
@@ -554,7 +567,6 @@ impl UniversalEngineInner {
         ),
         CompileError,
     > {
-        let code_memory = &mut self.code_memory;
         let function_count = local_functions.len();
         let call_trampoline_count = call_trampolines.len();
         let function_bodies = call_trampolines
@@ -574,9 +586,6 @@ impl UniversalEngineInner {
             }
             section_types.push(section.protection);
         }
-        code_memory.push(CodeMemory::new());
-        let code_memory = self.code_memory.last_mut().expect("infallible");
-
         let (mut allocated_functions, allocated_executable_sections, allocated_data_sections) =
             code_memory
                 .allocate(
@@ -648,24 +657,6 @@ impl UniversalEngineInner {
             allocated_dynamic_function_trampolines,
             allocated_custom_sections,
         ))
-    }
-
-    /// Make memory containing compiled code executable.
-    pub(crate) fn publish_compiled_code(&mut self) {
-        self.code_memory.last_mut().unwrap().publish();
-    }
-
-    /// Register DWARF-type exception handling information associated with the code.
-    pub(crate) fn publish_eh_frame(&mut self, eh_frame: &[u8]) -> Result<(), CompileError> {
-        self.code_memory
-            .last_mut()
-            .unwrap()
-            .unwind_registry_mut()
-            .publish(eh_frame)
-            .map_err(|e| {
-                CompileError::Resource(format!("Error while publishing the unwind code: {}", e))
-            })?;
-        Ok(())
     }
 
     /// Shared func metadata registry.

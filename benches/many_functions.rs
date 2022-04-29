@@ -20,17 +20,20 @@ fn nops(c: &mut Criterion) {
     for size in [1, 10, 100, 1000, 10000] {
         let wat = call_many_functions(size);
         let store = Store::new(&Universal::new(Singlepass::new()).engine());
+        let engine = store.engine().downcast_ref::<UniversalEngine>().unwrap();
         let mut compile = c.benchmark_group("compile");
+        let mut code_memory = CodeMemory::new();
         compile.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                let module = Module::new(&store, &wat).unwrap();
+                let module = Module::new(&store, &wat, &mut code_memory).unwrap();
                 let imports = imports! {};
                 let _ = Instance::new(&module, &imports).unwrap();
             })
         });
         drop(compile);
 
-        let module = Module::new(&store, &wat).unwrap();
+        let mut code_memory = CodeMemory::new();
+        let module = Module::new(&store, &wat, &mut code_memory).unwrap();
         let imports = imports! {};
         let instance = Instance::new(&module, &imports).unwrap();
         let mut get_main = c.benchmark_group("get_main");
@@ -73,7 +76,7 @@ fn nops(c: &mut Criterion) {
         deserialize.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| unsafe {
                 let deserialized = UniversalExecutableRef::deserialize(&serialized).unwrap();
-                black_box(store.engine().load(&deserialized).unwrap());
+                black_box(engine.load(&mut code_memory, &deserialized).unwrap());
             })
         });
     }

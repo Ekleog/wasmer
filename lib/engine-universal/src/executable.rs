@@ -126,17 +126,25 @@ pub enum ExecutableSerializeError {
     ),
 }
 
-impl wasmer_engine::Executable for UniversalExecutable {
+impl wasmer_engine::Loadable for UniversalExecutable {
+    type CodeStore = crate::CodeMemory;
+
     fn load(
         &self,
+        code_memory: &mut Self::CodeStore,
         engine: &(dyn Engine + 'static),
     ) -> Result<std::sync::Arc<dyn Artifact>, CompileError> {
         engine
             .downcast_ref::<crate::UniversalEngine>()
-            .ok_or(CompileError::EngineDowncast)?
-            .load_universal_executable(self)
+            .unwrap_or_else(|| {
+                panic!("UniversalExecutable::load may only be called with UniversalEngine")
+            })
+            .load_universal_executable(code_memory, self)
             .map(|a| Arc::new(a) as _)
     }
+}
+
+impl wasmer_engine::Executable for UniversalExecutable {
 
     fn features(&self) -> Features {
         self.compile_info.features.clone()
@@ -188,18 +196,24 @@ impl wasmer_engine::Executable for UniversalExecutable {
     }
 }
 
-impl<'a> wasmer_engine::Executable for UniversalExecutableRef<'a> {
+impl<'a> wasmer_engine::Loadable for UniversalExecutableRef<'a> {
+    type CodeStore = crate::CodeMemory;
     fn load(
         &self,
+        code_memory: &mut Self::CodeStore,
         engine: &(dyn Engine + 'static),
     ) -> Result<std::sync::Arc<dyn Artifact>, CompileError> {
         engine
             .downcast_ref::<crate::UniversalEngine>()
-            .ok_or_else(|| CompileError::Codegen("can't downcast TODO FIXME".into()))?
-            .load_universal_executable_ref(self)
+            .unwrap_or_else(|| {
+                panic!("UniversalExecutableRef::load may only be called with UniversalEngine")
+            })
+            .load_universal_executable_ref(code_memory, self)
             .map(|a| Arc::new(a) as _)
     }
+}
 
+impl<'a> wasmer_engine::Executable for UniversalExecutableRef<'a> {
     fn features(&self) -> Features {
         unrkyv(&self.archive.compile_info.features)
     }

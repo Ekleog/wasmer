@@ -8,19 +8,26 @@ mod private {
     pub struct Internal(pub(super) ());
 }
 
-/// A WASM module built by some [`Engine`](crate::Engine).
-///
-/// Types implementing this trait are ready to be saved (to e.g. disk) for later use or loaded with
-/// the `Engine` to in order to produce an [`Artifact`](crate::Artifact).
-pub trait Executable {
+/// [`Executables`] that can be loaded into an [`Artifact`].
+pub trait Loadable: Executable {
+    /// Where code is stored for these executables.
+    type CodeStore;
+
     /// Load this executable with the specified engine.
     ///
     /// TODO(0-copy): change error type here.
     fn load(
         &self,
+        code_store: &mut Self::CodeStore,
         engine: &(dyn Engine + 'static),
     ) -> Result<std::sync::Arc<dyn Artifact>, CompileError>;
+}
 
+/// A WASM module built by some [`Engine`](crate::Engine).
+///
+/// Types implementing this trait are ready to be saved (to e.g. disk) for later use or loaded with
+/// the `Engine` to in order to produce an [`Artifact`](crate::Artifact).
+pub trait Executable {
     /// The features with which this `Executable` was built.
     fn features(&self) -> Features;
 

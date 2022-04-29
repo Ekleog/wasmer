@@ -46,7 +46,8 @@ fn test_trap_trace(config: crate::Config) -> Result<()> {
         )
     "#;
 
-    let module = Module::new(&store, wat)?;
+    let mut code_memory = CodeMemory::new();
+    let module = Module::new(&store, wat, &mut code_memory)?;
     let instance = Instance::new(&module, &imports! {})?;
     let run_func = instance
         .lookup_function("run")
@@ -426,7 +427,8 @@ fn start_trap_pretty(config: crate::Config) -> Result<()> {
         )
     "#;
 
-    let module = Module::new(&store, wat)?;
+    let mut code_memory = CodeMemory::new();
+    let module = Module::new(&store, wat, &mut code_memory)?;
     let err = Instance::new(&module, &imports! {})
         .err()
         .expect("expected error");
@@ -447,7 +449,8 @@ RuntimeError: unreachable
 #[compiler_test(traps)]
 fn present_after_module_drop(config: crate::Config) -> Result<()> {
     let store = config.store();
-    let module = Module::new(&store, r#"(func (export "foo") unreachable)"#)?;
+    let mut code_memory = CodeMemory::new();
+    let module = Module::new(&store, r#"(func (export "foo") unreachable)"#, &mut code_memory)?;
     let instance = Instance::new(&module, &imports! {})?;
     let func: Function = instance.lookup_function("foo").unwrap();
 

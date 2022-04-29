@@ -35,12 +35,13 @@ impl CodeMemory {
     }
 
     /// Mutably get the UnwindRegistry.
-    pub fn unwind_registry_mut(&mut self) -> &mut UnwindRegistry {
+    pub(crate) fn unwind_registry_mut(&mut self) -> &mut UnwindRegistry {
         &mut self.unwind_registry
     }
 
-    /// Allocate a single contiguous block of memory for the functions and custom sections, and copy the data in place.
-    pub fn allocate(
+    /// Allocate a single contiguous block of memory for the functions and custom sections, and
+    /// copy the data in place.
+    pub(crate) fn allocate(
         &mut self,
         functions: &[FunctionBodyRef<'_>],
         executable_sections: &[CustomSectionRef<'_>],
@@ -49,8 +50,6 @@ impl CodeMemory {
         let mut function_result = vec![];
         let mut data_section_result = vec![];
         let mut executable_section_result = vec![];
-
-        let page_size = region::page::size();
 
         // 1. Calculate the total size, that is:
         // - function body size, including all trampolines
@@ -61,8 +60,7 @@ impl CodeMemory {
         // - padding until a new page to change page permissions
         // - data section body size
         // -- padding between data sections
-
-        let total_len = round_up(
+        let total_len = Mmap::round_up_to_page_size(
             functions.iter().fold(0, |acc, func| {
                 round_up(
                     acc + Self::function_allocation_size(*func),
@@ -71,14 +69,16 @@ impl CodeMemory {
             }) + executable_sections.iter().fold(0, |acc, exec| {
                 round_up(acc + exec.bytes.len(), ARCH_FUNCTION_ALIGNMENT)
             }),
-            page_size,
         ) + data_sections.iter().fold(0, |acc, data| {
             round_up(acc + data.bytes.len(), DATA_SECTION_ALIGNMENT)
         });
 
         // 2. Allocate the pages. Mark them all read-write.
-
-        self.mmap = Mmap::with_at_least(total_len)?;
+        if total_len <= self.mmap.len() {
+            self.unpublish()
+        } else {
+            self.mmap = Mmap::with_at_least(total_len).map_err(|e| e.to_string())?;
+        }
 
         // 3. Determine where the pointers to each function, executable section
         // or data section are. Copy the functions. Collect the addresses of each and return them.
@@ -109,12 +109,12 @@ impl CodeMemory {
             executable_section_result.push(s);
         }
 
-        self.start_of_nonexecutable_pages = bytes;
+        self.start_of_nonexecutable_pages = Mmap::round_up_to_page_size(bytes);
 
         if !data_sections.is_empty() {
             // Data sections have different page permissions from the executable
             // code that came before it, so they need to be on different pages.
-            let padding = round_up(bytes, page_size) - bytes;
+            let padding = self.start_of_nonexecutable_pages - bytes;
             buf = buf.split_at_mut(padding).1;
 
             for section in data_sections {
@@ -136,7 +136,7 @@ impl CodeMemory {
     }
 
     /// Apply the page permissions.
-    pub fn publish(&mut self) {
+    pub(crate) fn publish(&mut self) {
         if self.mmap.is_empty() || self.start_of_nonexecutable_pages == 0 {
             return;
         }
@@ -149,6 +149,21 @@ impl CodeMemory {
             )
         }
         .expect("unable to make memory readonly and executable");
+    }
+
+    pub(crate) fn unpublish(&mut self) {
+        if self.mmap.is_empty() || self.start_of_nonexecutable_pages == 0 {
+            return;
+        }
+        assert!(self.mmap.len() >= self.start_of_nonexecutable_pages);
+        unsafe {
+            region::protect(
+                self.mmap.as_mut_ptr(),
+                self.start_of_nonexecutable_pages,
+                region::Protection::READ_WRITE,
+            )
+        }
+        .expect("unable to make memory rw");
     }
 
     /// Calculates the allocation size of the given compiled function.

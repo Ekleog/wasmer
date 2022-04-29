@@ -20,11 +20,11 @@ use thiserror::Error;
 use wasmer_types::{Bytes, MemoryType, Pages};
 
 /// Error type describing things that can go wrong when operating on Wasm Memories.
-#[derive(Error, Debug, Clone, PartialEq, Hash)]
+#[derive(Error, Debug)]
 pub enum MemoryError {
     /// Low level error with mmap.
     #[error("Error when allocating memory: {0}")]
-    Region(String),
+    Region(std::io::Error),
     /// The operation would cause the size of the memory to exceed the maximum or would cause
     /// an overflow leading to unindexable memory.
     #[error("The memory could not grow: current size {} pages, requested increase: {} pages", current.0, attempted_delta.0)]

@@ -6,6 +6,7 @@ mod sys {
     #[test]
     fn exports_work_after_multiple_instances_have_been_freed() -> Result<()> {
         let store = Store::default();
+        let mut code_memory = CodeMemory::new();
         let module = Module::new(
             &store,
             "
@@ -17,6 +18,7 @@ mod sys {
         i32.add)
       (export \"sum\" (func $sum_f)))
 ",
+            &mut code_memory,
         )?;
 
         let import_object = ImportObject::new();
