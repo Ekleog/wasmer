@@ -15,6 +15,10 @@ pub(crate) struct Machine {
     used_xmms: HashSet<XMM>,
     stack_offset: MachineStackOffset,
     save_area_offset: Option<MachineStackOffset>,
+    /// Memory location at which local variables begin.
+    ///
+    /// Populated in `init_locals`.
+    locals_offset: MachineStackOffset,
 }
 
 impl Machine {
@@ -24,6 +28,7 @@ impl Machine {
             used_xmms: HashSet::new(),
             stack_offset: MachineStackOffset(0),
             save_area_offset: None,
+            locals_offset: MachineStackOffset(0),
         }
     }
 
@@ -300,45 +305,22 @@ impl Machine {
         }
     }
 
+    pub(crate) fn get_local_location(&self, idx: usize) -> Location {
+        // Use callee-saved registers for the first locals.
+        // FIXME: figure out what the +1 is for here and document it.
+        Location::Memory(GPR::RBP, -(((idx + 1) * 8 + self.locals_offset.0) as i32))
+    }
+
     pub(crate) fn init_locals<E: Emitter>(
         &mut self,
         a: &mut E,
         n: usize,
         n_params: usize,
         calling_convention: CallingConvention,
-    ) -> Vec<Location> {
-        // Determine whether a local should be allocated on the stack.
-        fn is_local_on_stack(idx: usize) -> bool {
-            idx > 3
-        }
-
-        // Determine a local's location.
-        fn get_local_location(idx: usize, callee_saved_regs_size: usize) -> Location {
-            // Use callee-saved registers for the first locals.
-            match idx {
-                0 => Location::GPR(GPR::R12),
-                1 => Location::GPR(GPR::R13),
-                2 => Location::GPR(GPR::R14),
-                3 => Location::GPR(GPR::RBX),
-                _ => Location::Memory(GPR::RBP, -(((idx - 3) * 8 + callee_saved_regs_size) as i32)),
-            }
-        }
-
-        // How many machine stack slots will all the locals use?
-        let num_mem_slots = (0..n).filter(|&x| is_local_on_stack(x)).count();
-
+    ) {
         // Total size (in bytes) of the pre-allocated "static area" for this function's
         // locals and callee-saved registers.
         let mut static_area_size: usize = 0;
-
-        // Callee-saved registers used for locals.
-        // Keep this consistent with the "Save callee-saved registers" code below.
-        for i in 0..n {
-            // If a local is not stored on stack, then it is allocated to a callee-saved register.
-            if !is_local_on_stack(i) {
-                static_area_size += 8;
-            }
-        }
 
         // Callee-saved R15 for vmctx.
         static_area_size += 8;
@@ -349,15 +331,10 @@ impl Machine {
         }
 
         // Total size of callee saved registers.
-        let callee_saved_regs_size = static_area_size;
-
-        // Now we can determine concrete locations for locals.
-        let locations: Vec<Location> = (0..n)
-            .map(|i| get_local_location(i, callee_saved_regs_size))
-            .collect();
+        self.locals_offset = MachineStackOffset(static_area_size);
 
         // Add size of locals on stack.
-        static_area_size += num_mem_slots * 8;
+        static_area_size += n * 8;
 
         // Allocate save area, without actually writing to it.
         a.emit_sub(
@@ -365,18 +342,6 @@ impl Machine {
             Location::Imm32(static_area_size as _),
             Location::GPR(GPR::RSP),
         );
-
-        // Save callee-saved registers.
-        for loc in locations.iter() {
-            if let Location::GPR(_) = *loc {
-                self.stack_offset.0 += 8;
-                a.emit_mov(
-                    Size::S64,
-                    *loc,
-                    Location::Memory(GPR::RBP, -(self.stack_offset.0 as i32)),
-                );
-            }
-        }
 
         // Save R15 for vmctx use.
         self.stack_offset.0 += 8;
@@ -411,17 +376,18 @@ impl Machine {
         // so we won't skip the stack guard page here.
         for i in 0..n_params {
             let loc = Self::get_param_location(i + 1, calling_convention);
+            let local_loc = self.get_local_location(i);
             match loc {
                 Location::GPR(_) => {
-                    a.emit_mov(Size::S64, loc, locations[i]);
+                    a.emit_mov(Size::S64, loc, local_loc);
                 }
-                Location::Memory(_, _) => match locations[i] {
+                Location::Memory(_, _) => match local_loc {
                     Location::GPR(_) => {
-                        a.emit_mov(Size::S64, loc, locations[i]);
+                        a.emit_mov(Size::S64, loc, local_loc);
                     }
                     Location::Memory(_, _) => {
                         a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
-                        a.emit_mov(Size::S64, Location::GPR(GPR::RAX), locations[i]);
+                        a.emit_mov(Size::S64, Location::GPR(GPR::RAX), local_loc);
                     }
                     _ => unreachable!(),
                 },
@@ -441,20 +407,17 @@ impl Machine {
         // `rep stosq` writes data from low address to high address and may skip the stack guard page.
         // so here we probe it explicitly when needed.
         for i in (n_params..n).step_by(NATIVE_PAGE_SIZE / 8).skip(1) {
-            a.emit_mov(Size::S64, Location::Imm32(0), locations[i]);
+            a.emit_mov(Size::S64, Location::Imm32(0), self.get_local_location(i));
         }
 
         // Initialize all normal locals to zero.
         let mut init_stack_loc_cnt = 0;
         let mut last_stack_loc = Location::Memory(GPR::RBP, i32::MAX);
         for i in n_params..n {
-            match locations[i] {
+            match self.get_local_location(i) {
                 Location::Memory(_, _) => {
                     init_stack_loc_cnt += 1;
-                    last_stack_loc = cmp::min(last_stack_loc, locations[i]);
-                }
-                Location::GPR(_) => {
-                    a.emit_mov(Size::S64, Location::Imm32(0), locations[i]);
+                    last_stack_loc = cmp::min(last_stack_loc, self.get_local_location(i));
                 }
                 _ => unreachable!(),
             }
@@ -472,15 +435,12 @@ impl Machine {
         }
 
         // Add the size of all locals allocated to stack.
-        self.stack_offset.0 += static_area_size - callee_saved_regs_size;
-
-        locations
+        self.stack_offset.0 += static_area_size - self.locals_offset.0;
     }
 
     pub(crate) fn finalize_locals<E: Emitter>(
         &mut self,
         a: &mut E,
-        locations: &[Location],
         calling_convention: CallingConvention,
     ) {
         // Unwind stack to the "save area".
@@ -500,13 +460,6 @@ impl Machine {
         }
         // Restore R15 used by vmctx.
         a.emit_pop(Size::S64, Location::GPR(GPR::R15));
-
-        // Restore callee-saved registers.
-        for loc in locations.iter().rev() {
-            if let Location::GPR(_) = *loc {
-                a.emit_pop(Size::S64, *loc);
-            }
-        }
     }
 
     pub(crate) fn get_param_location(

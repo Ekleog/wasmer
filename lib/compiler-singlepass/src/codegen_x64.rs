@@ -57,9 +57,6 @@ pub(crate) struct FuncGen<'a> {
     /// support automatic relative relocations for `Vec<u8>`.
     assembler: Assembler,
 
-    /// Memory locations of local variables.
-    locals: Vec<Location>,
-
     /// Types of local variables, including arguments.
     local_types: Vec<WpType>,
 
@@ -1878,7 +1875,7 @@ impl<'a> FuncGen<'a> {
         self.assembler
             .emit_mov(Size::S64, Location::GPR(GPR::RSP), Location::GPR(GPR::RBP));
         // Initialize locals.
-        self.locals = self.machine.init_locals(
+        self.machine.init_locals(
             &mut self.assembler,
             self.local_types.len(),
             self.signature.params().len(),
@@ -1959,7 +1956,6 @@ impl<'a> FuncGen<'a> {
             // table_styles,
             signature,
             assembler,
-            locals: vec![], // initialization deferred to emit_head
             local_types,
             value_stack: vec![],
             max_stack_depth: 0,
@@ -2120,7 +2116,7 @@ impl<'a> FuncGen<'a> {
                 self.emit_relaxed_binop(
                     Assembler::emit_mov,
                     Size::S64,
-                    self.locals[local_index],
+                    self.machine.get_local_location(local_index),
                     ret,
                 );
                 self.value_stack.push(ret);
@@ -2146,14 +2142,14 @@ impl<'a> FuncGen<'a> {
                                 _ => unreachable!(),
                             },
                             loc,
-                            self.locals[local_index],
+                            self.machine.get_local_location(local_index),
                         );
                     } else {
                         self.emit_relaxed_binop(
                             Assembler::emit_mov,
                             Size::S64,
                             loc,
-                            self.locals[local_index],
+                            self.machine.get_local_location(local_index),
                         );
                     }
                 } else {
@@ -2161,7 +2157,7 @@ impl<'a> FuncGen<'a> {
                         Assembler::emit_mov,
                         Size::S64,
                         loc,
-                        self.locals[local_index],
+                        self.machine.get_local_location(local_index),
                     );
                 }
             }
@@ -2182,14 +2178,14 @@ impl<'a> FuncGen<'a> {
                                 _ => unreachable!(),
                             },
                             loc,
-                            self.locals[local_index],
+                            self.machine.get_local_location(local_index),
                         );
                     } else {
                         self.emit_relaxed_binop(
                             Assembler::emit_mov,
                             Size::S64,
                             loc,
-                            self.locals[local_index],
+                            self.machine.get_local_location(local_index),
                         );
                     }
                 } else {
@@ -2197,7 +2193,7 @@ impl<'a> FuncGen<'a> {
                         Assembler::emit_mov,
                         Size::S64,
                         loc,
-                        self.locals[local_index],
+                        self.machine.get_local_location(local_index),
                     );
                 }
             }
@@ -6520,7 +6516,6 @@ impl<'a> FuncGen<'a> {
                     self.emit_function_stack_check(false);
                     self.machine.finalize_locals(
                         &mut self.assembler,
-                        &self.locals,
                         self.calling_convention,
                     );
                     self.assembler.emit_mov(
