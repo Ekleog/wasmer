@@ -305,17 +305,30 @@ impl Machine {
         }
     }
 
-    pub(crate) fn get_local_location(&self, idx: usize) -> Location {
+    pub(crate) fn get_local_location(&self, idx: u32) -> Location {
         // Use callee-saved registers for the first locals.
+        //
+        // NB: This calculation cannot reasonably overflow. `self.locals_offset` will typically be
+        // small (< 32), and `idx` is bounded to `51000` due to limits imposed by the wasmparser
+        // validator. We introduce a debug_assert here to ensure that `idx` never really exceeds
+        // some incredibly large value.
+        debug_assert!(
+            idx <= 999_999,
+            "this runtime can't deal with unreasonable number of locals"
+        );
         // FIXME: figure out what the +1 is for here and document it.
-        Location::Memory(GPR::RBP, -(((idx + 1) * 8 + self.locals_offset.0) as i32))
+        let local_offset = idx.wrapping_add(1).wrapping_mul(8);
+        Location::Memory(
+            GPR::RBP,
+            (local_offset.wrapping_add(self.locals_offset.0 as u32) as i32).wrapping_neg(),
+        )
     }
 
     pub(crate) fn init_locals<E: Emitter>(
         &mut self,
         a: &mut E,
-        n: usize,
-        n_params: usize,
+        n: u32,
+        n_params: u32,
         calling_convention: CallingConvention,
     ) {
         // Total size (in bytes) of the pre-allocated "static area" for this function's
@@ -334,7 +347,7 @@ impl Machine {
         self.locals_offset = MachineStackOffset(static_area_size);
 
         // Add size of locals on stack.
-        static_area_size += n * 8;
+        static_area_size += (n * 8) as usize;
 
         // Allocate save area, without actually writing to it.
         a.emit_sub(
@@ -375,7 +388,7 @@ impl Machine {
         // Locals are allocated on the stack from higher address to lower address,
         // so we won't skip the stack guard page here.
         for i in 0..n_params {
-            let loc = Self::get_param_location(i + 1, calling_convention);
+            let loc = Self::get_param_location((i + 1) as usize, calling_convention);
             let local_loc = self.get_local_location(i);
             match loc {
                 Location::GPR(_) => {

@@ -7,7 +7,8 @@ use smallvec::{smallvec, SmallVec};
 use std::cmp::max;
 use std::iter;
 use wasmer_compiler::wasmparser::{
-    MemoryImmediate, Operator, Type as WpType, TypeOrFuncType as WpTypeOrFuncType,
+    BinaryReaderError, MemoryImmediate, Operator, Type as WpType,
+    TypeOrFuncType as WpTypeOrFuncType,
 };
 use wasmer_compiler::{
     CallingConvention, CompiledFunction, CompiledFunctionFrameInfo, CustomSection,
@@ -57,8 +58,17 @@ pub(crate) struct FuncGen<'a> {
     /// support automatic relative relocations for `Vec<u8>`.
     assembler: Assembler,
 
+    /// Count of local variables, including arguments.
+    local_count: u32,
     /// Types of local variables, including arguments.
-    local_types: Vec<WpType>,
+    ///
+    /// This is represented as a skip list. The `u32` value represents the index up-to which the
+    /// local is of type `WpType`. If we have
+    ///
+    /// 0: u32, 10: u64, 15: f64
+    ///
+    /// then 0th local is u32, 1st through 10th local is u64 and 11th thorugh 15th locals is a f64.
+    local_types: Vec<(u32, WpType)>,
 
     /// Value stack.
     value_stack: Vec<Location>,
@@ -1858,7 +1868,7 @@ impl<'a> FuncGen<'a> {
 
     fn emit_function_stack_check(&mut self, enter: bool) {
         // `local_types` include parameters as well.
-        let depth = self.local_types.len()
+        let depth = self.local_count as usize
             + self.max_stack_depth
             // we add 4 to ensure that deep recursion is prohibited even for local and argument free
             // functions, as they still use stack space for the saved frame base and return address,
@@ -1867,7 +1877,7 @@ impl<'a> FuncGen<'a> {
         self.emit_stack_check(enter, depth);
     }
 
-    fn emit_head(&mut self) -> Result<(), CodegenError> {
+    pub(crate) fn emit_head(&mut self) -> Result<(), CodegenError> {
         // TODO: Patchpoint is not emitted for now, and ARM trampoline is not prepended.
 
         // Normal x86 entry prologue.
@@ -1877,8 +1887,8 @@ impl<'a> FuncGen<'a> {
         // Initialize locals.
         self.machine.init_locals(
             &mut self.assembler,
-            self.local_types.len(),
-            self.signature.params().len(),
+            self.local_count,
+            self.signature.params().len() as u32,
             self.calling_convention,
         );
 
@@ -1921,19 +1931,11 @@ impl<'a> FuncGen<'a> {
         vmoffsets: &'a VMOffsets,
         _table_styles: &'a PrimaryMap<TableIndex, TableStyle>,
         local_func_index: LocalFunctionIndex,
-        local_types_excluding_arguments: &[WpType],
         calling_convention: CallingConvention,
     ) -> Result<FuncGen<'a>, CodegenError> {
         let func_index = module.func_index(local_func_index);
         let sig_index = module.functions[func_index];
         let signature = module.signatures[sig_index].clone();
-
-        let mut local_types: Vec<_> = signature
-            .params()
-            .iter()
-            .map(|&x| type_to_wp_type(x))
-            .collect();
-        local_types.extend_from_slice(&local_types_excluding_arguments);
 
         let mut assembler = Assembler::new(0);
         let special_labels = SpecialLabelSet {
@@ -1953,10 +1955,9 @@ impl<'a> FuncGen<'a> {
             module_translation_state,
             config,
             vmoffsets,
-            // table_styles,
-            signature,
+            local_count: 0,
+            local_types: Vec::with_capacity(signature.params().len()),
             assembler,
-            local_types,
             value_stack: vec![],
             max_stack_depth: 0,
             stack_check_offset: AssemblyOffset(0),
@@ -1969,13 +1970,56 @@ impl<'a> FuncGen<'a> {
             src_loc: 0,
             instructions_address_map: vec![],
             calling_convention,
+            signature,
         };
-        fg.emit_head()?;
+        for param in module.signatures[sig_index].params() {
+            fg.feed_local(1, type_to_wp_type(*param))?;
+        }
         Ok(fg)
     }
 
     pub(crate) fn has_control_frames(&self) -> bool {
         !self.control_stack.is_empty()
+    }
+
+    pub(crate) fn feed_local(
+        &mut self,
+        local_count: u32,
+        local_type: WpType,
+    ) -> Result<(), CodegenError> {
+        self.local_count =
+            self.local_count
+                .checked_add(local_count)
+                .ok_or_else(|| CodegenError {
+                    message: "too many locals and arguments".into(),
+                })?;
+        self.local_types.push((self.local_count - 1, local_type));
+        Ok(())
+    }
+
+    /// Fetches the type for the local at `idx`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the local index is out of bounds. That the index is in-bounds should be ensured
+    /// by the validator and therefore any instsance of this panicking is an implementation error.
+    fn local(&self, idx: u32) -> WpType {
+        match self.local_types.binary_search_by_key(&idx, |(idx, _)| *idx) {
+            // If this index would be inserted at the end of the list, then the
+            // index is out of bounds and we return an error.
+            Err(i) if i == self.local_types.len() => {
+                panic!(
+                    "local {} is out of bounds (we have {} locals)",
+                    idx, self.local_count
+                );
+            }
+            // If `Ok` is returned we found the index exactly, or if `Err` is
+            // returned the position is the one which is the least index
+            // greater than `idx`, which is still the type of `idx` according
+            // to our "compressed" representation. In both cases we access the
+            // list at index `i`.
+            Ok(i) | Err(i) => self.local_types[i].1,
+        }
     }
 
     pub(crate) fn feed_operator(&mut self, op: Operator) -> Result<(), CodegenError> {
@@ -2109,7 +2153,7 @@ impl<'a> FuncGen<'a> {
                 self.machine.release_temp_gpr(tmp);
             }
             Operator::LocalGet { local_index } => {
-                let local_index = local_index as usize;
+                let local_type = self.local(local_index);
                 let ret =
                     self.machine
                         .acquire_locations(&mut self.assembler, &[(WpType::I64)], false)[0];
@@ -2120,23 +2164,23 @@ impl<'a> FuncGen<'a> {
                     ret,
                 );
                 self.value_stack.push(ret);
-                if self.local_types[local_index].is_float() {
+                if local_type.is_float() {
                     self.fp_stack
                         .push(FloatValue::new(self.value_stack.len() - 1));
                 }
             }
             Operator::LocalSet { local_index } => {
-                let local_index = local_index as usize;
                 let loc = self.pop_value_released();
+                let local_type = self.local(local_index);
 
-                if self.local_types[local_index].is_float() {
+                if local_type.is_float() {
                     let fp = self.fp_stack.pop1()?;
                     if self.assembler.arch_supports_canonicalize_nan()
                         && self.config.enable_nan_canonicalization
                         && fp.canonicalization.is_some()
                     {
                         self.canonicalize_nan(
-                            match self.local_types[local_index] {
+                            match local_type {
                                 WpType::F32 => Size::S32,
                                 WpType::F64 => Size::S64,
                                 _ => unreachable!(),
@@ -2162,17 +2206,16 @@ impl<'a> FuncGen<'a> {
                 }
             }
             Operator::LocalTee { local_index } => {
-                let local_index = local_index as usize;
                 let loc = *self.value_stack.last().unwrap();
-
-                if self.local_types[local_index].is_float() {
+                let local_type = self.local(local_index);
+                if local_type.is_float() {
                     let fp = self.fp_stack.peek1()?;
                     if self.assembler.arch_supports_canonicalize_nan()
                         && self.config.enable_nan_canonicalization
                         && fp.canonicalization.is_some()
                     {
                         self.canonicalize_nan(
-                            match self.local_types[local_index] {
+                            match local_type {
                                 WpType::F32 => Size::S32,
                                 WpType::F64 => Size::S64,
                                 _ => unreachable!(),
@@ -6514,10 +6557,8 @@ impl<'a> FuncGen<'a> {
                     self.assembler.emit_label(frame.label);
                     self.update_max_stack_depth();
                     self.emit_function_stack_check(false);
-                    self.machine.finalize_locals(
-                        &mut self.assembler,
-                        self.calling_convention,
-                    );
+                    self.machine
+                        .finalize_locals(&mut self.assembler, self.calling_convention);
                     self.assembler.emit_mov(
                         Size::S64,
                         Location::GPR(GPR::RBP),
