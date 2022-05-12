@@ -7,8 +7,7 @@ use smallvec::{smallvec, SmallVec};
 use std::cmp::max;
 use std::iter;
 use wasmer_compiler::wasmparser::{
-    BinaryReaderError, MemoryImmediate, Operator, Type as WpType,
-    TypeOrFuncType as WpTypeOrFuncType,
+    MemoryImmediate, Operator, Type as WpType, TypeOrFuncType as WpTypeOrFuncType,
 };
 use wasmer_compiler::{
     CallingConvention, CompiledFunction, CompiledFunctionFrameInfo, CustomSection,
@@ -58,17 +57,8 @@ pub(crate) struct FuncGen<'a> {
     /// support automatic relative relocations for `Vec<u8>`.
     assembler: Assembler,
 
-    /// Count of local variables, including arguments.
-    local_count: u32,
-    /// Types of local variables, including arguments.
-    ///
-    /// This is represented as a skip list. The `u32` value represents the index up-to which the
-    /// local is of type `WpType`. If we have
-    ///
-    /// 0: u32, 10: u64, 15: f64
-    ///
-    /// then 0th local is u32, 1st through 10th local is u64 and 11th thorugh 15th locals is a f64.
-    local_types: Vec<(u32, WpType)>,
+    /// Types of the local variables, including arguments.
+    local_types: wasmer_types::partial_sum_map::PartialSumMap<u32, WpType>,
 
     /// Value stack.
     value_stack: Vec<Location>,
@@ -1868,7 +1858,7 @@ impl<'a> FuncGen<'a> {
 
     fn emit_function_stack_check(&mut self, enter: bool) {
         // `local_types` include parameters as well.
-        let depth = self.local_count as usize
+        let depth = self.local_count() as usize
             + self.max_stack_depth
             // we add 4 to ensure that deep recursion is prohibited even for local and argument free
             // functions, as they still use stack space for the saved frame base and return address,
@@ -1885,9 +1875,10 @@ impl<'a> FuncGen<'a> {
         self.assembler
             .emit_mov(Size::S64, Location::GPR(GPR::RSP), Location::GPR(GPR::RBP));
         // Initialize locals.
+        let local_count = self.local_count();
         self.machine.init_locals(
             &mut self.assembler,
-            self.local_count,
+            local_count,
             self.signature.params().len() as u32,
             self.calling_convention,
         );
@@ -1955,8 +1946,7 @@ impl<'a> FuncGen<'a> {
             module_translation_state,
             config,
             vmoffsets,
-            local_count: 0,
-            local_types: Vec::with_capacity(signature.params().len()),
+            local_types: wasmer_types::partial_sum_map::PartialSumMap::new(),
             assembler,
             value_stack: vec![],
             max_stack_depth: 0,
@@ -1987,39 +1977,29 @@ impl<'a> FuncGen<'a> {
         local_count: u32,
         local_type: WpType,
     ) -> Result<(), CodegenError> {
-        self.local_count =
-            self.local_count
-                .checked_add(local_count)
-                .ok_or_else(|| CodegenError {
-                    message: "too many locals and arguments".into(),
-                })?;
-        self.local_types.push((self.local_count - 1, local_type));
+        self.local_types
+            .push(local_count, local_type)
+            .map_err(|e| CodegenError {
+                message: format!("could not process a local: {}", e),
+            });
+        // We will want to add +1 to this number in `local_count` later.
+        if self.local_types.max_index() == Some(u32::max_value()) {
+            return Err(CodegenError {
+                message: "too many locals".into(),
+            });
+        }
         Ok(())
     }
 
-    /// Fetches the type for the local at `idx`.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the local index is out of bounds. That the index is in-bounds should be ensured
-    /// by the validator and therefore any instsance of this panicking is an implementation error.
-    fn local(&self, idx: u32) -> WpType {
-        match self.local_types.binary_search_by_key(&idx, |(idx, _)| *idx) {
-            // If this index would be inserted at the end of the list, then the
-            // index is out of bounds and we return an error.
-            Err(i) if i == self.local_types.len() => {
-                panic!(
-                    "local {} is out of bounds (we have {} locals)",
-                    idx, self.local_count
-                );
-            }
-            // If `Ok` is returned we found the index exactly, or if `Err` is
-            // returned the position is the one which is the least index
-            // greater than `idx`, which is still the type of `idx` according
-            // to our "compressed" representation. In both cases we access the
-            // list at index `i`.
-            Ok(i) | Err(i) => self.local_types[i].1,
-        }
+    pub(crate) fn local_count(&self) -> u32 {
+        self.local_types.max_index().map_or(0, |v| v + 1)
+    }
+
+    pub(crate) fn local_type(&self, index: u32) -> WpType {
+        *self
+            .local_types
+            .find(index)
+            .expect("local index out of bounds")
     }
 
     pub(crate) fn feed_operator(&mut self, op: Operator) -> Result<(), CodegenError> {
@@ -2153,7 +2133,7 @@ impl<'a> FuncGen<'a> {
                 self.machine.release_temp_gpr(tmp);
             }
             Operator::LocalGet { local_index } => {
-                let local_type = self.local(local_index);
+                let local_type = self.local_type(local_index);
                 let ret =
                     self.machine
                         .acquire_locations(&mut self.assembler, &[(WpType::I64)], false)[0];
@@ -2171,7 +2151,7 @@ impl<'a> FuncGen<'a> {
             }
             Operator::LocalSet { local_index } => {
                 let loc = self.pop_value_released();
-                let local_type = self.local(local_index);
+                let local_type = self.local_type(local_index);
 
                 if local_type.is_float() {
                     let fp = self.fp_stack.pop1()?;
@@ -2207,7 +2187,7 @@ impl<'a> FuncGen<'a> {
             }
             Operator::LocalTee { local_index } => {
                 let loc = *self.value_stack.last().unwrap();
-                let local_type = self.local(local_index);
+                let local_type = self.local_type(local_index);
                 if local_type.is_float() {
                     let fp = self.fp_stack.peek1()?;
                     if self.assembler.arch_supports_canonicalize_nan()
