@@ -1972,17 +1972,22 @@ impl<'a> FuncGen<'a> {
         !self.control_stack.is_empty()
     }
 
+    /// Introduce additional local variables to this function.
+    ///
+    /// Calling this after [`emit_head`](Self::emit_head) has been invoked is non-sensical.
     pub(crate) fn feed_local(
         &mut self,
         local_count: u32,
         local_type: WpType,
     ) -> Result<(), CodegenError> {
+        // FIXME: somehow verify that we haven't invoked `emit_head` yet? Doing so could lead us to
+        // generate code that accesses the stack buffer out of bounds.
         self.local_types
             .push(local_count, local_type)
             .map_err(|e| CodegenError {
                 message: format!("could not process a local: {}", e),
-            });
-        // We will want to add +1 to this number in `local_count` later.
+            })?;
+        // We will want to add `+ 1` to this number in `local_count` later.
         if self.local_types.max_index() == Some(u32::max_value()) {
             return Err(CodegenError {
                 message: "too many locals".into(),
@@ -1991,10 +1996,20 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
+    /// Total number of locals and arguments so far.
+    ///
+    /// More can be introduced with the [`feed_local`](Self::feed_local) method.
     pub(crate) fn local_count(&self) -> u32 {
         self.local_types.max_index().map_or(0, |v| v + 1)
     }
 
+    /// Obtain a type of the local or an argument at the specified index.
+    ///
+    /// # Panics
+    ///
+    /// Note that this will panic if `index` is out of bounds, which can happen if an
+    /// implementation error has occurred or if the WASM module hasn't been validated to conform to
+    /// the web assembly specification.
     pub(crate) fn local_type(&self, index: u32) -> WpType {
         *self
             .local_types

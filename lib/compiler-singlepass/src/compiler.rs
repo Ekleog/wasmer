@@ -120,7 +120,9 @@ impl Compiler for SinglepassCompiler {
                 let mut local_reader = reader.get_locals_reader()?;
                 for _ in 0..local_reader.get_count() {
                     let (count, ty) = local_reader.read()?;
-                    // Overflowing has been already been validated by the validator.
+                    // Overflows feeding a local here have most likely already been caught by the
+                    // validator, but it is possible that the validator hasn't been run at all, or
+                    // that the validator does not impose any limits on the number of locals.
                     generator.feed_local(count, ty).map_err(to_compile_error)?;
                 }
 
