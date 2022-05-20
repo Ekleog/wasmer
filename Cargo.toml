@@ -241,3 +241,8 @@ required-features = ["cranelift"]
 name = "features"
 path = "examples/features.rs"
 required-features = ["cranelift"]
+
+[[example]]
+name = "coremark"
+path = "examples/coremark.rs"
+required-features = ["singlepass"]
