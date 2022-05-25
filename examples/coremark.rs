@@ -1,14 +1,8 @@
-//! A Wasm module can be compiled with multiple compilers.
-//!
-//! This example illustrates how to use the Singlepass compiler.
-//!
-//! You can run the example directly by executing in Wasmer root:
+//! Benchmark the codegen quality with a compute benchmark.
 //!
 //! ```shell
-//! cargo run --example compiler-singlepass --release --features "singlepass"
+//! cargo run --example coremark --release --features "singlepass"
 //! ```
-//!
-//! Ready?
 
 use wasmer::{imports, wat2wasm, Function, FunctionType, Instance, Module, Store, Type, Value};
 use wasmer_compiler_singlepass::Singlepass;

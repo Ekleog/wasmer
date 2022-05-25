@@ -82,14 +82,14 @@ impl<K: PartialSumKey, V> PartialSumMap<K, V> {
 #[doc(hidden)]
 pub trait PartialSumKey: Copy + Eq + Ord {
     const ZERO: Self;
-    const ONE: Self;
+
     fn step(self, count: Self) -> Result<Self, Error>;
     fn first_index(self) -> Self;
 }
 
 impl PartialSumKey for u32 {
     const ZERO: Self = 0;
-    const ONE: Self = 1;
+
     fn step(self, count: Self) -> Result<Self, Error> {
         self.checked_add(count).ok_or(Error::Overflow)
     }

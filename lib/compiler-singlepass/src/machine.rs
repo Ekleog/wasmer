@@ -306,8 +306,6 @@ impl Machine {
     }
 
     pub(crate) fn get_local_location(&self, idx: u32) -> Location {
-        // Use callee-saved registers for the first locals.
-        //
         // NB: This calculation cannot reasonably overflow. `self.locals_offset` will typically be
         // small (< 32), and `idx` is bounded to `51000` due to limits imposed by the wasmparser
         // validator. We introduce a debug_assert here to ensure that `idx` never really exceeds
@@ -316,8 +314,8 @@ impl Machine {
             idx <= 999_999,
             "this runtime can't deal with unreasonable number of locals"
         );
-        // FIXME: figure out what the +1 is for here and document it.
-        let local_offset = idx.wrapping_add(1).wrapping_mul(8);
+
+        let local_offset = idx.wrapping_mul(8);
         Location::Memory(
             GPR::RBP,
             (local_offset.wrapping_add(self.locals_offset.0 as u32) as i32).wrapping_neg(),
@@ -343,16 +341,16 @@ impl Machine {
             static_area_size += 8 * 2;
         }
 
-        // Total size of callee saved registers.
-        self.locals_offset = MachineStackOffset(static_area_size);
-
-        // Add size of locals on stack.
-        static_area_size += (n * 8) as usize;
+        // The offset pointing at the very first local. Right now `static_area_size` is pointing at
+        // the end address of the 0th local, not at the start address, so we add `8` bytes to fix
+        // this up.
+        self.locals_offset = MachineStackOffset(static_area_size + 8);
+        let locals_size = (n * 8) as usize;
 
         // Allocate save area, without actually writing to it.
         a.emit_sub(
             Size::S64,
-            Location::Imm32(static_area_size as _),
+            Location::Imm32((static_area_size + locals_size) as _),
             Location::GPR(GPR::RSP),
         );
 
@@ -448,7 +446,7 @@ impl Machine {
         }
 
         // Add the size of all locals allocated to stack.
-        self.stack_offset.0 += static_area_size - self.locals_offset.0;
+        self.stack_offset.0 += locals_size;
     }
 
     pub(crate) fn finalize_locals<E: Emitter>(

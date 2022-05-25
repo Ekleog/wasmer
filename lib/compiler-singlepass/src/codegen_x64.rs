@@ -1874,6 +1874,7 @@ impl<'a> FuncGen<'a> {
         self.assembler.emit_push(Size::S64, Location::GPR(GPR::RBP));
         self.assembler
             .emit_mov(Size::S64, Location::GPR(GPR::RSP), Location::GPR(GPR::RBP));
+
         // Initialize locals.
         let local_count = self.local_count();
         self.machine.init_locals(
@@ -2003,7 +2004,7 @@ impl<'a> FuncGen<'a> {
         self.local_types.max_index().map_or(0, |v| v + 1)
     }
 
-    /// Obtain a type of the local or an argument at the specified index.
+    /// Obtain the type of the local or argument at the specified index.
     ///
     /// # Panics
     ///
