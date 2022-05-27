@@ -5,7 +5,6 @@ use wasmer_types::Type;
 /// General-purpose registers.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[allow(dead_code)] // Some registers are never used? Lovely!
 pub(crate) enum GPR {
     /// RAX register
     RAX,

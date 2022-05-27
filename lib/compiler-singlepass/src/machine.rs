@@ -1,7 +1,6 @@
 use crate::emitter_x64::*;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::cmp;
 use std::collections::HashSet;
 use wasmer_compiler::wasmparser::Type as WpType;
 use wasmer_compiler::CallingConvention;
@@ -305,6 +304,8 @@ impl Machine {
         }
     }
 
+    const LOCAL_REGISTERS: &'static [GPR] = &[GPR::R12, GPR::R13, GPR::R14, GPR::RBX];
+
     pub(crate) fn get_local_location(&self, idx: u32) -> Location {
         // NB: This calculation cannot reasonably overflow. `self.locals_offset` will typically be
         // small (< 32), and `idx` is bounded to `51000` due to limits imposed by the wasmparser
@@ -314,12 +315,19 @@ impl Machine {
             idx <= 999_999,
             "this runtime can't deal with unreasonable number of locals"
         );
-
-        let local_offset = idx.wrapping_mul(8);
-        Location::Memory(
-            GPR::RBP,
-            (local_offset.wrapping_add(self.locals_offset.0 as u32) as i32).wrapping_neg(),
-        )
+        Self::LOCAL_REGISTERS
+            .get(idx as usize)
+            .map(|r| Location::GPR(*r))
+            .unwrap_or_else(|| {
+                let local_offset = idx
+                    .checked_sub(Self::LOCAL_REGISTERS.len() as u32)
+                    .unwrap()
+                    .wrapping_mul(8);
+                Location::Memory(
+                    GPR::RBP,
+                    (local_offset.wrapping_add(self.locals_offset.0 as u32) as i32).wrapping_neg(),
+                )
+            })
     }
 
     pub(crate) fn init_locals<E: Emitter>(
@@ -333,6 +341,9 @@ impl Machine {
         // locals and callee-saved registers.
         let mut static_area_size: usize = 0;
 
+        // Space to clobber registers used for locals.
+        static_area_size += 8 * std::cmp::min(Self::LOCAL_REGISTERS.len(), n as usize);
+
         // Callee-saved R15 for vmctx.
         static_area_size += 8;
 
@@ -345,14 +356,24 @@ impl Machine {
         // the end address of the 0th local, not at the start address, so we add `8` bytes to fix
         // this up.
         self.locals_offset = MachineStackOffset(static_area_size + 8);
-        let locals_size = (n * 8) as usize;
+        let locals_size = (n as usize).saturating_sub(Self::LOCAL_REGISTERS.len()) * 8;
 
-        // Allocate save area, without actually writing to it.
+        // Allocate the stack, without actually writing to it.
         a.emit_sub(
             Size::S64,
             Location::Imm32((static_area_size + locals_size) as _),
             Location::GPR(GPR::RSP),
         );
+
+        // Save callee-saved registers
+        for local_reg in Self::LOCAL_REGISTERS.iter().take(n as usize) {
+            self.stack_offset.0 += 8;
+            a.emit_mov(
+                Size::S64,
+                Location::GPR(*local_reg),
+                Location::Memory(GPR::RBP, -(self.stack_offset.0 as i32)),
+            );
+        }
 
         // Save R15 for vmctx use.
         self.stack_offset.0 += 8;
@@ -363,20 +384,14 @@ impl Machine {
         );
 
         if calling_convention == CallingConvention::WindowsFastcall {
-            // Save RDI
-            self.stack_offset.0 += 8;
-            a.emit_mov(
-                Size::S64,
-                Location::GPR(GPR::RDI),
-                Location::Memory(GPR::RBP, -(self.stack_offset.0 as i32)),
-            );
-            // Save RSI
-            self.stack_offset.0 += 8;
-            a.emit_mov(
-                Size::S64,
-                Location::GPR(GPR::RSI),
-                Location::Memory(GPR::RBP, -(self.stack_offset.0 as i32)),
-            );
+            for reg in [GPR::RDI, GPR::RSI] {
+                self.stack_offset.0 += 8;
+                a.emit_mov(
+                    Size::S64,
+                    Location::GPR(reg),
+                    Location::Memory(GPR::RBP, -(self.stack_offset.0 as i32)),
+                );
+            }
         }
 
         // Save the offset of register save area.
@@ -386,6 +401,7 @@ impl Machine {
         // Locals are allocated on the stack from higher address to lower address,
         // so we won't skip the stack guard page here.
         for i in 0..n_params {
+            // NB: the 0th parameter is used for passing around the internal VM data (vmctx).
             let loc = Self::get_param_location((i + 1) as usize, calling_convention);
             let local_loc = self.get_local_location(i);
             match loc {
@@ -421,27 +437,35 @@ impl Machine {
             a.emit_mov(Size::S64, Location::Imm32(0), self.get_local_location(i));
         }
 
-        // Initialize all normal locals to zero.
-        let mut init_stack_loc_cnt = 0;
-        let mut last_stack_loc = Location::Memory(GPR::RBP, i32::MAX);
-        for i in n_params..n {
-            match self.get_local_location(i) {
-                Location::Memory(_, _) => {
-                    init_stack_loc_cnt += 1;
-                    last_stack_loc = cmp::min(last_stack_loc, self.get_local_location(i));
-                }
-                _ => unreachable!(),
-            }
+        // Initialize all remaining locals to zero.
+        //
+        // This is a little tricky, as we want to initialize all stack local slots, except for
+        // those that were already populated with function argument data. The complication is in
+        // the fact that we allocate some registers to the first couple local slots.
+        //
+        // First: handle the locals that are allocated to registers...
+        for local_reg_idx in Self::LOCAL_REGISTERS
+            .iter()
+            .skip(n_params as usize)
+            .take((n_params..n).len())
+        {
+            a.emit_mov(Size::S64, Location::Imm32(0), Location::GPR(*local_reg_idx));
         }
-        if init_stack_loc_cnt > 0 {
+        // Second: handle the locals that are allocated to the stack.
+        let stack_loc_idxs = std::cmp::max(Self::LOCAL_REGISTERS.len() as u32, n_params)..n;
+        if stack_loc_idxs.len() > 0 {
             // Since these assemblies take up to 24 bytes, if more than 2 slots are initialized, then they are smaller.
             a.emit_mov(
                 Size::S64,
-                Location::Imm64(init_stack_loc_cnt as u64),
+                Location::Imm64(stack_loc_idxs.len() as u64),
                 Location::GPR(GPR::RCX),
             );
             a.emit_xor(Size::S64, Location::GPR(GPR::RAX), Location::GPR(GPR::RAX));
-            a.emit_lea(Size::S64, last_stack_loc, Location::GPR(GPR::RDI));
+            a.emit_lea(
+                Size::S64,
+                self.get_local_location(n - 1),
+                Location::GPR(GPR::RDI),
+            );
             a.emit_rep_stosq();
         }
 
@@ -453,6 +477,7 @@ impl Machine {
         &mut self,
         a: &mut E,
         calling_convention: CallingConvention,
+        local_count: u32,
     ) {
         // Unwind stack to the "save area".
         a.emit_lea(
@@ -471,6 +496,15 @@ impl Machine {
         }
         // Restore R15 used by vmctx.
         a.emit_pop(Size::S64, Location::GPR(GPR::R15));
+
+        // Restore callee-saved registers that we used for locals.
+        for reg in Self::LOCAL_REGISTERS
+            .iter()
+            .take(local_count as usize)
+            .rev()
+        {
+            a.emit_pop(Size::S64, Location::GPR(*reg));
+        }
     }
 
     pub(crate) fn get_param_location(

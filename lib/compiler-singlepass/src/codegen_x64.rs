@@ -6553,8 +6553,12 @@ impl<'a> FuncGen<'a> {
                     self.assembler.emit_label(frame.label);
                     self.update_max_stack_depth();
                     self.emit_function_stack_check(false);
-                    self.machine
-                        .finalize_locals(&mut self.assembler, self.calling_convention);
+                    let local_count = self.local_count();
+                    self.machine.finalize_locals(
+                        &mut self.assembler,
+                        self.calling_convention,
+                        local_count,
+                    );
                     self.assembler.emit_mov(
                         Size::S64,
                         Location::GPR(GPR::RBP),
@@ -8448,10 +8452,11 @@ impl<'a> FuncGen<'a> {
         let body_len = self.assembler.get_offset().0;
         let instructions_address_map = self.instructions_address_map;
         let address_map = get_function_address_map(instructions_address_map, data, body_len);
+        let body = self.assembler.finalize().unwrap().to_vec();
 
         CompiledFunction {
             body: FunctionBody {
-                body: self.assembler.finalize().unwrap().to_vec(),
+                body,
                 unwind_info: None,
             },
             relocations: self.relocations,
